@@ -1,0 +1,668 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Relative Keyboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 flex justify-center items-center min-h-screen">
+    <div class="p-6 bg-white rounded-lg shadow-lg">
+        <h1 class="text-2xl font-bold text-center mb-4">Relative Keyboard</h1>
+        <p class="text-center mb-2">Current Note: None</p>
+        <p class="text-center mb-2">Tonic: C4</p>
+        <p class="text-center mb-2">Mode: Ionian</p>
+        <p class="text-center mb-2">Chord: None</p>
+        <p class="text-center mb-2">Intervals: 6th -1, 4th -1, 3rd -1, 2nd -1, Last Note, 2nd, 3rd, 4th, 6th</p>
+        <p class="text-center mb-2">Top Row Octave Offset: 0</p>
+        <p class="text-center mb-2">MIDI Status: Checking...</p>
+        <div class="flex justify-center mb-4">
+            <select id="midi-select" class="p-2 border rounded hidden">
+                <option value="">Select MIDI Port</option>
+            </select>
+        </div>
+        <div class="flex justify-center mb-4">
+            <select id="tone-select" class="p-2 border rounded">
+                <option value="sine">Sine Wave</option>
+                <option value="organ">Organ</option>
+                <option value="buzz1">Buzz1</option>
+                <option value="buzz2">Buzz2</option>
+                <option value="ting">Ting</option>
+            </select>
+        </div>
+        <p class="text-center mb-4">Serve over HTTPS (e.g., Netlify, GitHub Pages) for MIDI. Use keypad 1–9 for notes (5 for last note, 1–4 descending, 6–9 ascending), 0 to play and reset to tonic (e.g., C4 in C major); top row 1–9 for notes relative to last keypad note; Shift + 3, 4, 5, 6, 7, 8, 9 or * + 1–7 for modes; / + 1–7 for keys; + or keypad + to cycle tones; - or keypad - + 0 for random intervals, - + 1 for original intervals, - + 5 for intervals with 5th; = or keypad = + 1 for +1 octave top row, = + 2 for -1 octave.</p>
+    </div>
+
+    <script>
+        // Initialize Web Audio context
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // Global state
+        let currentKey = 0; // MIDI note offset (e.g., 0 = C)
+        let currentMode = 'ionian'; // Current musical mode
+        let currentTonicDegree = 0; // Tracks degree relative to tonic
+        let currentNote = 60; // Last numpad note’s MIDI value (default C4)
+        const activeOscillators = new Map(); // Tracks active notes for polyphony
+        let currentTone = 'sine'; // Current waveform
+        let midiOutput = null; // MIDI output device
+        let keySelectionMode = null; // State for key/mode/interval/octave selection
+        let keySelectionTimeout = null; // Timeout for selection mode
+        const tones = ['sine', 'organ', 'buzz1', 'buzz2', 'ting']; // Available tones
+        let topRowOctaveOffset = 0; // Octave offset for top row keys
+
+        // Musical modes (intervals in semitones)
+        const modes = {
+            ionian: [0, 2, 4, 5, 7, 9, 11],
+            dorian: [0, 2, 3, 5, 7, 9, 10],
+            phrygian: [0, 1, 3, 5, 7, 8, 10],
+            lydian: [0, 2, 4, 6, 7, 9, 11],
+            mixolydian: [0, 2, 4, 5, 7, 9, 10],
+            aeolian: [0, 2, 3, 5, 7, 8, 10],
+            locrian: [0, 1, 3, 5, 6, 8, 10]
+        };
+
+        // Note key map for numpad and top row keys
+        const baseNoteKeyMap = {
+            'Numpad0': { degree: 0, buttonKey: 'numpad0', isNumpad: true },
+            'Numpad1': { degree: -5, buttonKey: '1', isNumpad: true },
+            'Numpad2': { degree: -3, buttonKey: '2', isNumpad: true },
+            'Numpad3': { degree: -2, buttonKey: '3', isNumpad: true },
+            'Numpad4': { degree: -1, buttonKey: '4', isNumpad: true },
+            'Numpad5': { degree: 0, buttonKey: '5', isNumpad: true },
+            'Numpad6': { degree: 1, buttonKey: '6', isNumpad: true },
+            'Numpad7': { degree: 2, buttonKey: '7', isNumpad: true },
+            'Numpad8': { degree: 3, buttonKey: '8', isNumpad: true },
+            'Numpad9': { degree: 5, buttonKey: '9', isNumpad: true },
+            '0': { degree: 0, buttonKey: 'numpad0', isNumpad: true },
+            '1': { degree: -5, buttonKey: '1', isNumpad: true },
+            '2': { degree: -3, buttonKey: '2', isNumpad: true },
+            '3': { degree: -2, buttonKey: '3', isNumpad: true },
+            '4': { degree: -1, buttonKey: '4', isNumpad: true },
+            '5': { degree: 0, buttonKey: '5', isNumpad: true },
+            '6': { degree: 1, buttonKey: '6', isNumpad: true },
+            '7': { degree: 2, buttonKey: '7', isNumpad: true },
+            '8': { degree: 3, buttonKey: '8', isNumpad: true },
+            '9': { degree: 5, buttonKey: '9', isNumpad: true },
+            'Digit0': { degree: 0, buttonKey: 'digit0', isNumpad: false },
+            'Digit1': { degree: -5, buttonKey: 'digit1', isNumpad: false },
+            'Digit2': { degree: -3, buttonKey: 'digit2', isNumpad: false },
+            'Digit3': { degree: -2, buttonKey: 'digit3', isNumpad: false },
+            'Digit4': { degree: -1, buttonKey: 'digit4', isNumpad: false },
+            'Digit5': { degree: 0, buttonKey: 'digit5', isNumpad: false },
+            'Digit6': { degree: 1, buttonKey: 'digit6', isNumpad: false },
+            'Digit7': { degree: 2, buttonKey: 'digit7', isNumpad: false },
+            'Digit8': { degree: 3, buttonKey: 'digit8', isNumpad: false },
+            'Digit9': { degree: 5, buttonKey: 'digit9', isNumpad: false }
+        };
+
+        let noteKeyMap = { ...baseNoteKeyMap };
+
+        // Mode key map for Shift + top-row numbers
+        const modeKeyMap = {
+            '#': 'ionian',
+            '$': 'dorian',
+            '^': 'phrygian',
+            '%': 'lydian',
+            '&': 'mixolydian',
+            '*': 'aeolian',
+            '(': 'locrian'
+        };
+
+        // Key selection map for / + 1–7
+        const keySelectionMap = {
+            '1': 0,
+            '2': 2,
+            '3': 4,
+            '4': 5,
+            '5': 7,
+            '6': 9,
+            '7': 11
+        };
+
+        // Mode selection map for * + 1–7
+        const modeSelectionMap = {
+            '1': 'ionian',
+            '2': 'dorian',
+            '3': 'phrygian',
+            '4': 'lydian',
+            '5': 'mixolydian',
+            '6': 'aeolian',
+            '7': 'locrian'
+        };
+
+        // Interval selection map for - + 0/1/5
+        const intervalSelectionMap = {
+            '0': 'random',
+            '1': 'original',
+            '5': 'withFifth'
+        };
+
+        // Octave offset selection map for = + 1/2
+        const octaveSelectionMap = {
+            '1': 1,
+            '2': -1
+        };
+
+        // Chord detection templates
+        const chordTemplates = {
+            'major': [0, 4, 7],
+            'minor': [0, 3, 7],
+            'diminished': [0, 3, 6],
+            'augmented': [0, 4, 8],
+            'sus2': [0, 2, 7],
+            'sus4': [0, 5, 7]
+        };
+
+        // Detect chords from active notes
+        function detectChord(notes) {
+            if (notes.length < 2) return 'None';
+            notes = notes.sort((a, b) => a - b);
+            for (const root of notes) {
+                const intervals = notes.map(note => (note - root) % 12).sort((a, b) => a - b);
+                for (const [type, template] of Object.entries(chordTemplates)) {
+                    if (template.every(interval => intervals.includes(interval))) {
+                        return `${midiToNoteName(root)} ${type}`;
+                    }
+                }
+            }
+            if (notes.length === 2) {
+                const interval = Math.abs((notes[1] - notes[0]) % 12);
+                if (interval === 3 || interval === 4) {
+                    const root = Math.min(...notes);
+                    const type = interval === 4 ? 'major' : 'minor';
+                    return `${midiToNoteName(root)} ${type} (partial)`;
+                }
+            }
+            return 'None';
+        }
+
+        // Initialize MIDI with port selection
+        function initMidi() {
+            if (navigator.requestMIDIAccess) {
+                navigator.requestMIDIAccess().then(
+                    (midiAccess) => {
+                        const outputs = Array.from(midiAccess.outputs.values());
+                        if (outputs.length === 0) {
+                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: No devices found. Connect a MIDI device or enable IAC Driver.';
+                        } else if (outputs.length === 1) {
+                            midiOutput = outputs[0];
+                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
+                        } else {
+                            const select = document.getElementById('midi-select');
+                            select.innerHTML = '<option value="">Select MIDI Port</option>';
+                            outputs.forEach((output, index) => {
+                                const option = document.createElement('option');
+                                option.value = index;
+                                option.textContent = output.name;
+                                select.appendChild(option);
+                            });
+                            select.classList.remove('hidden');
+                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: Select a port';
+                            select.addEventListener('change', (event) => {
+                                const index = parseInt(event.target.value);
+                                if (index >= 0) {
+                                    midiOutput = outputs[index];
+                                    document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
+                                }
+                            });
+                        }
+                    },
+                    (err) => {
+                        const message = `MIDI Status: Permissions blocked. Serve over HTTPS (e.g., Netlify, GitHub Pages) and enable MIDI in Chrome settings (chrome://settings/content/midiDevices). Error: ${err.message}`;
+                        document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = message;
+                        console.error(`MIDI Access Error: ${err.message}`);
+                    }
+                );
+            } else {
+                document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: Web MIDI not supported. Use Chrome and serve over HTTPS.';
+            }
+        }
+
+        // Convert MIDI note to frequency
+        function midiToFreq(midiNote) {
+            return 440 * Math.pow(2, (midiNote - 69) / 12);
+        }
+
+        // Convert MIDI note to note name
+        function midiToNoteName(midiNote) {
+            const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+            const note = noteNames[midiNote % 12];
+            const octave = Math.floor(midiNote / 12) - 1;
+            return `${note}${octave}`;
+        }
+
+        // Update tonic display
+        function updateTonicDisplay() {
+            const tonicMidiNote = 60 + currentKey;
+            document.querySelector('p.text-center.mb-2:nth-child(3)').textContent = `Tonic: ${midiToNoteName(tonicMidiNote)}`;
+        }
+
+        // Update mode display
+        function updateModeDisplay() {
+            document.querySelector('p.text-center.mb-2:nth-child(4)').textContent = `Mode: ${currentMode.charAt(0).toUpperCase() + currentMode.slice(1)}`;
+        }
+
+        // Update chord display
+        function updateChordDisplay() {
+            const notes = Array.from(activeOscillators.values()).map(data => data.midiNote);
+            const chord = detectChord(notes);
+            document.querySelector('p.text-center.mb-2:nth-child(4)').textContent = `Chord: ${chord}`;
+        }
+
+        // Update intervals display
+        function updateIntervalsDisplay() {
+            const degrees = ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(key => noteKeyMap[`Numpad${key}`].degree);
+            const intervalLabels = degrees.map((degree, i) => {
+                if (degree === 0) return i === 4 ? 'Last Note' : 'Tonic';
+                const modeIntervals = modes[currentMode];
+                const degreeIndex = degree % 7;
+                const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
+                const interval = modeIntervals[normalizedDegreeIndex];
+                const octave = Math.floor(degree / 7);
+                const intervalNames = ['Tonic', '2nd', '3rd', '4th', '5th', '6th', '7th'];
+                return `${intervalNames[normalizedDegreeIndex]}${octave < 0 ? ' -1' : ''}`;
+            });
+            document.querySelector('p.text-center.mb-2:nth-child(5)').textContent = `Intervals: ${intervalLabels.join(', ')}`;
+        }
+
+        // Update octave offset display
+        function updateOctaveOffsetDisplay() {
+            document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = `Top Row Octave Offset: ${topRowOctaveOffset}`;
+        }
+
+        // Generate random intervals
+        function generateRandomIntervals() {
+            const modeIntervals = modes[currentMode];
+            const availableDegrees = [0, 1, 2, 3, 4, 5, 6];
+            const selectedDegrees = [];
+            while (selectedDegrees.length < 4) {
+                const index = Math.floor(Math.random() * availableDegrees.length);
+                selectedDegrees.push(availableDegrees.splice(index, 1)[0]);
+            }
+            selectedDegrees.sort((a, b) => a - b);
+            const descendingDegrees = selectedDegrees.map(d => -d - 1).sort((a, b) => b - a);
+            const newDegrees = [
+                descendingDegrees[0],
+                descendingDegrees[1],
+                descendingDegrees[2],
+                descendingDegrees[3],
+                0,
+                selectedDegrees[0],
+                selectedDegrees[1],
+                selectedDegrees[2],
+                selectedDegrees[3]
+            ];
+            return newDegrees;
+        }
+
+        // Set intervals
+        function setIntervals(type) {
+            let newDegrees;
+            if (type === 'random') {
+                newDegrees = generateRandomIntervals();
+            } else if (type === 'withFifth') {
+                newDegrees = [0, -4, -3, -2, -1, 0, 1, 2, 3, 4];
+            } else {
+                newDegrees = [0, -5, -3, -2, -1, 0, 1, 2, 3, 5];
+            }
+            ['Numpad0', 'Numpad1', 'Numpad2', 'Numpad3', 'Numpad4', 'Numpad5', 'Numpad6', 'Numpad7', 'Numpad8', 'Numpad9',
+             '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+             'Digit0', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'
+            ].forEach((key, i) => {
+                noteKeyMap[key].degree = newDegrees[i % 10];
+            });
+            updateIntervalsDisplay();
+            activeOscillators.forEach((_, key) => stopNote(key));
+        }
+
+        // Set octave offset
+        function setOctaveOffset(offset) {
+            topRowOctaveOffset = offset;
+            updateOctaveOffsetDisplay();
+            activeOscillators.forEach((_, key) => stopNote(key));
+        }
+
+        // Cycle tones
+        function cycleTone() {
+            const currentIndex = tones.indexOf(currentTone);
+            currentTone = tones[(currentIndex + 1) % tones.length];
+            document.getElementById('tone-select').value = currentTone;
+            activeOscillators.forEach((_, key) => stopNote(key));
+            console.log(`Cycled to tone: ${currentTone}`);
+        }
+
+        // Create a note with the selected tone and send MIDI
+        function startNote(degree, buttonKey = null, isTonic = false, isNumpad = true) {
+            const key = buttonKey || (isNumpad ? 'numpad0' : 'digit0');
+            if (activeOscillators.has(key)) return;
+
+            if (isTonic) currentTonicDegree = 0;
+
+            let midiNote;
+            if (isNumpad) {
+                midiNote = 60 + currentKey;
+                if (!isTonic) {
+                    const modeIntervals = modes[currentMode];
+                    const degreeIndex = (currentTonicDegree + degree) % 7;
+                    const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
+                    const octaveOffset = Math.floor((currentTonicDegree + degree) / 7) * 12;
+                    const interval = modeIntervals[normalizedDegreeIndex];
+                    midiNote = 60 + currentKey + interval + octaveOffset;
+                }
+            } else {
+                midiNote = currentNote + topRowOctaveOffset * 12;
+                if (!isTonic) {
+                    const modeIntervals = modes[currentMode];
+                    const degreeIndex = degree % 7;
+                    const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
+                    const octaveOffset = Math.floor(degree / 7) * 12;
+                    const interval = modeIntervals[normalizedDegreeIndex];
+                    midiNote += interval + octaveOffset;
+                }
+            }
+
+            // Clamp MIDI note to valid range (C1–C8, 24–108)
+            if (midiNote < 24 || midiNote > 108) {
+                midiNote = Math.max(24, Math.min(108, midiNote));
+                console.log(`Clamped MIDI note to ${midiNote}`);
+                return;
+            }
+
+            // Update currentNote for numpad keys
+            if (isNumpad) currentNote = midiNote;
+
+            // Send MIDI Note On
+            if (midiOutput) {
+                try {
+                    midiOutput.send([0x90, midiNote, 100]);
+                } catch (e) {
+                    console.error(`MIDI Note On error: ${e.message}`);
+                }
+            }
+
+            const frequency = midiToFreq(midiNote);
+            const now = audioCtx.currentTime;
+
+            if (currentTone === 'sine') {
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                oscillator.type = 'sine';
+                oscillator.frequency.setValueAtTime(frequency, now);
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.start();
+                activeOscillators.set(key, { oscillator, gainNode, midiNote });
+            } else if (currentTone === 'organ') {
+                const oscillators = [];
+                const gainNode = audioCtx.createGain();
+                [1, 2, 3].forEach(harmonic => {
+                    const osc = audioCtx.createOscillator();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(frequency * harmonic, now);
+                    osc.connect(gainNode);
+                    oscillators.push(osc);
+                });
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.2, now + 0.005);
+                gainNode.connect(audioCtx.destination);
+                oscillators.forEach(osc => osc.start());
+                activeOscillators.set(key, { oscillators, gainNode, midiNote });
+            } else if (currentTone === 'buzz1') {
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                oscillator.type = 'sawtooth';
+                oscillator.frequency.setValueAtTime(frequency, now);
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
+                gainNode.gain.exponentialRampToValueAtTime(0.1, now + 0.5);
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.start();
+                activeOscillators.set(key, { oscillator, gainNode, midiNote });
+            } else if (currentTone === 'buzz2') {
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                oscillator.type = 'square';
+                oscillator.frequency.setValueAtTime(frequency, now);
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
+                gainNode.gain.exponentialRampToValueAtTime(0.05, now + 0.3);
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.start();
+                activeOscillators.set(key, { oscillator, gainNode, midiNote });
+            } else if (currentTone === 'ting') {
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                oscillator.type = 'triangle';
+                oscillator.frequency.setValueAtTime(frequency, now);
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
+                gainNode.gain.exponentialRampToValueAtTime(0.05, now + 0.3);
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.start();
+                activeOscillators.set(key, { oscillator, gainNode, midiNote });
+            }
+
+            updateChordDisplay();
+            if (isTonic) updateTonicDisplay();
+
+            return { degree, midiNote };
+        }
+
+        // Stop playing a note and send MIDI Note Off
+        function stopNote(key) {
+            const noteData = activeOscillators.get(key) || {};
+            const { oscillator, oscillators, gainNode, midiNote } = noteData;
+            if (gainNode) {
+                const now = audioCtx.currentTime;
+                gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+                gainNode.gain.linearRampToValueAtTime(0.001, now + 0.005);
+                if (oscillator) {
+                    oscillator.stop(now + 0.005);
+                } else if (oscillators) {
+                    oscillators.forEach(osc => osc.stop(now + 0.005));
+                }
+                if (midiOutput && midiNote) {
+                    try {
+                        midiOutput.send([0x80, midiNote, 0]);
+                    } catch (e) {
+                        console.error(`MIDI Note Off error: ${e.message}`);
+                    }
+                }
+                activeOscillators.delete(key);
+
+                if (midiNote) {
+                    document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: ${midiToNoteName(midiNote)}`;
+                }
+                updateChordDisplay();
+            }
+        }
+
+        // Update tonic after a note is played
+        function updateTonic(degree, midiNote) {
+            if (midiNote <= 24 || midiNote >= 108) return;
+            currentTonicDegree += degree;
+        }
+
+        // Change mode
+        function changeMode(mode) {
+            currentMode = mode;
+            currentTonicDegree = 0;
+            currentNote = 60 + currentKey;
+            document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: None`;
+            updateModeDisplay();
+            updateTonicDisplay();
+            updateIntervalsDisplay();
+            activeOscillators.forEach((_, key) => stopNote(key));
+        }
+
+        // Change key
+        function changeKey(keyOffset) {
+            currentKey = keyOffset;
+            currentTonicDegree = 0;
+            currentNote = 60 + currentKey;
+            document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: None`;
+            updateTonicDisplay();
+            updateModeDisplay();
+            updateIntervalsDisplay();
+            activeOscillators.forEach((_, key) => stopNote(key));
+        }
+
+        // Cycle tones
+        function cycleTone() {
+            const currentIndex = tones.indexOf(currentTone);
+            currentTone = tones[(currentIndex + 1) % tones.length];
+            document.getElementById('tone-select').value = currentTone;
+            activeOscillators.forEach((_, key) => stopNote(key));
+            console.log(`Cycled to tone: ${currentTone}`);
+        }
+
+        // Handle tone selection via dropdown
+        document.getElementById('tone-select').addEventListener('change', (event) => {
+            currentTone = event.target.value;
+            activeOscillators.forEach((_, key) => stopNote(key));
+        });
+
+        // Keyboard input handling
+        document.addEventListener('keydown', (event) => {
+            const key = event.key;
+            const code = event.code;
+            const shift = event.shiftKey;
+
+            console.log(`Keydown: key=${key}, code=${code}, shift=${shift}`);
+
+            if (keySelectionMode) {
+                if (keySelectionMode === 'key' && key in keySelectionMap) {
+                    changeKey(keySelectionMap[key]);
+                    console.log(`Selected key: offset=${keySelectionMap[key]}`);
+                    keySelectionMode = null;
+                    clearTimeout(keySelectionTimeout);
+                } else if (keySelectionMode === 'mode' && key in modeSelectionMap) {
+                    changeMode(modeSelectionMap[key]);
+                    console.log(`Selected mode: ${modeSelectionMap[key]}`);
+                    keySelectionMode = null;
+                    clearTimeout(keySelectionTimeout);
+                } else if (keySelectionMode === 'interval' && key in intervalSelectionMap) {
+                    setIntervals(intervalSelectionMap[key]);
+                    console.log(`Selected intervals: ${intervalSelectionMap[key]}`);
+                    keySelectionMode = null;
+                    clearTimeout(keySelectionTimeout);
+                } else if (keySelectionMode === 'octave' && key in octaveSelectionMap) {
+                    setOctaveOffset(octaveSelectionMap[key]);
+                    console.log(`Selected octave offset: ${octaveSelectionMap[key]}`);
+                    keySelectionMode = null;
+                    clearTimeout(keySelectionTimeout);
+                }
+                return;
+            }
+
+            if (!shift && (code === 'NumpadDivide' || key === '/')) {
+                keySelectionMode = 'key';
+                keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
+                console.log('Entered key selection mode (/ + 1–7)');
+                return;
+            }
+
+            if (!shift && (code === 'NumpadMultiply' || key === '*')) {
+                keySelectionMode = 'mode';
+                keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
+                console.log('Entered mode selection mode (* + 1–7)');
+                return;
+            }
+
+            if (!shift && (code === 'NumpadSubtract' || key === '-')) {
+                keySelectionMode = 'interval';
+                keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
+                console.log('Entered interval selection mode (- + 0, 1, 5)');
+                return;
+            }
+
+            if (!shift && (code === 'NumpadEqual' || key === '=')) {
+                keySelectionMode = 'octave';
+                keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
+                console.log('Entered octave offset mode (= + 1, 2)');
+                return;
+            }
+
+            if (!shift && (code === 'NumpadAdd' || key === '+')) {
+                cycleTone();
+                return;
+            }
+
+            if (!shift && noteKeyMap[code]) {
+                console.log(`Note key matched: code=${code}, degree=${noteKeyMap[code].degree}, buttonKey=${noteKeyMap[code].buttonKey}, isNumpad=${noteKeyMap[code].isNumpad}`);
+                const degree = noteKeyMap[code].degree;
+                const isNumpad = noteKeyMap[code].isNumpad;
+                const result = startNote(degree, noteKeyMap[code].buttonKey, code === 'Numpad0' || code === '0' || code === 'Digit0', isNumpad);
+                if (result && (code !== 'Numpad0' && code !== '0' && code !== 'Digit0')) {
+                    updateTonic(degree, result.midiNote);
+                }
+            } else if (shift && modeKeyMap[key]) {
+                console.log(`Mode key matched: key=${key}, mode=${modeKeyMap[key]}`);
+                changeMode(modeKeyMap[key]);
+            }
+        });
+
+        document.addEventListener('keyup', (event) => {
+            const key = event.key;
+            const code = event.code;
+
+            console.log(`Keyup: key=${key}, code=${code}`);
+
+            if (noteKeyMap[code]) {
+                console.log(`Stopping note for code=${code}, buttonKey=${noteKeyMap[code].buttonKey}`);
+                stopNote(noteKeyMap[code].buttonKey);
+            }
+        });
+
+        // Initialize MIDI and displays
+        initMidi();
+        updateTonicDisplay();
+        updateModeDisplay();
+        updateIntervalsDisplay();
+        updateOctaveOffsetDisplay();
+    </script>
+</body>
+</html>
