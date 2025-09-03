@@ -1,3 +1,4 @@
+<!-- GRK 2025-09-03: Added configurable key mapping for keypad layouts (default and alternate with NumLock/Clear), sequencer placeholder, and UI dropdown for layout selection -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -56,8 +57,8 @@
         const tones = ['sine', 'organ', 'buzz1', 'buzz2', 'ting'];
         let topRowOctaveOffset = 0;
         let currentKeypadLayout = 'default';
-        let sequencerState = 'stopped'; // Sequencer placeholder
-        const sequence = []; // Sequencer placeholder
+        let sequencerState = 'stopped';
+        const sequence = [];
 
         // Keypad layout mappings
         const keyMappings = {
