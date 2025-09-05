@@ -1,4 +1,5 @@
-<!-- GRK 2025-09-04: Restored MIDI functionality, removed chord detection, updated sequencer with play/pause/clear controls, made notes relative to sequencer note in play mode, modified 0/5 keys for octave shifts in sequencer play mode, added configurable tempo/steps, and updated documentation -->
+<!-- GRK 2025-09-04: Simplified sequencer integration, restored basic relative keyboard functionality, made relative notes and special 0/5 octave behavior active only during sequencer play mode, restored / and * functionality, reintroduced set mode for tempo/steps. -->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -37,13 +38,11 @@
                 <option value="ting">Ting</option>
             </select>
         </div>
-        <p class="text-center mb-4">Serve over HTTPS (e.g., GitHub Pages) for MIDI. Use keypad 0–9 for notes (5 for last note or +1 octave in sequencer play mode, 0 for tonic or -1 octave in play mode, 1–4 descending, 6–9 ascending); top row 0–9 for notes relative to last keypad note; NumLock or Clear (F) for key selection or sequencer controls (F+C to record, F+D to clear); / (A) for key selection, * (B) for mode, + (C) for tone cycle or play/pause in sequencer play mode, - (D) for intervals; Enter for sequencer record toggle; Shift + 3–9 for modes; = + 1/2 for top row octave offset (+1/-1); number + F + 7/8 to set tempo/steps (e.g., 160 F 7 for 160 BPM).</p>
+        <p class="text-center mb-4">Serve over HTTPS (e.g., Netlify) for MIDI. Use keypad or number keys 1–9 for notes (5 for last note, 1 for 6th -1, 2 for 4th -1, 3 for 3rd -1, 4 for 2nd -1, 9 for 6th), 0 to play and reset to tonic (e.g., C4 in C major); top row 1–9 for notes relative to last keypad note; Shift + 3, 4, 5, 6, 7, 8, 9 or * + 1–7 for modes (Ionian, Dorian, etc.); / + 1–7 for keys (C, D, E, F, G, A, B); + or keypad + to cycle tones (Sine, Organ, Buzz1, Buzz2, Ting); - or keypad - + 0 for random intervals, - + 1 for original, - + 5 for intervals with 5th; = or keypad = + 0 for +1 octave top row, = + 1 for -1 octave; Enter or keypad enter to toggle sequencer record; C or keypad + to play/pause sequencer; F or NumLock/Clear + C to start recording; F + D to clear sequencer; number + F + 7 for tempo, + F + 8 for steps (e.g., 160 F 7 for 160 BPM).</p>
     </div>
 
     <script>
-        // Initialize Web Audio context
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        // Global state
         let currentKey = 0;
         let currentMode = 'ionian';
         let currentTonicDegree = 0;
@@ -51,10 +50,8 @@
         const activeOscillators = new Map();
         let currentTone = 'sine';
         let midiOutput = null;
-        let keySelectionMode = null; // null, 'key', 'mode', 'interval', 'octave', 'set'
+        let keySelectionMode = null;
         let keySelectionTimeout = null;
-        let setSelectionType = null; // 'tempo' or 'steps'
-        let setValue = ''; // Buffer for set number input
         const tones = ['sine', 'organ', 'buzz1', 'buzz2', 'ting'];
         let topRowOctaveOffset = 0;
         let currentKeypadLayout = 'default';
@@ -92,7 +89,7 @@
                 NumLock: { action: 'keySelection' },
                 NumpadDivide: { action: 'keySelection' }, // / maps to A
                 NumpadMultiply: { action: 'modeSelection' }, // * maps to B
-                NumpadAdd: { action: 'sequencerPlayPause' }, // + maps to C
+                NumpadAdd: { action: 'toneCycle' }, // + maps to C
                 NumpadSubtract: { action: 'intervalSelection' }, // - maps to D
                 NumpadEnter: { action: 'sequencerRecordToggle' }, // Enter for sequencer
                 '0': { action: 'note', degree: 0, buttonKey: 'numpad0', isNumpad: true },
@@ -109,7 +106,7 @@
                 Asterisk: { action: 'modeSelection' }, // * (alternate for B)
                 Equal: { action: 'octaveSelection' }, // = for octave offset
                 Minus: { action: 'intervalSelection' }, // - (alternate for D)
-                Plus: { action: 'sequencerPlayPause' } // + (alternate for C)
+                Plus: { action: 'toneCycle' } // + (alternate for C)
             },
             alternate: {
                 Numpad0: { action: 'note', degree: 0, buttonKey: 'numpad0', isNumpad: true },
@@ -135,7 +132,7 @@
                 Clear: { action: 'keySelection' }, // Alternate for NumLock
                 NumpadDivide: { action: 'keySelection' },
                 NumpadMultiply: { action: 'modeSelection' },
-                NumpadAdd: { action: 'sequencerPlayPause' },
+                NumpadAdd: { action: 'toneCycle' },
                 NumpadSubtract: { action: 'intervalSelection' },
                 NumpadEnter: { action: 'sequencerRecordToggle' },
                 '0': { action: 'note', degree: 0, buttonKey: 'numpad0', isNumpad: true },
@@ -152,7 +149,7 @@
                 Asterisk: { action: 'modeSelection' },
                 Equal: { action: 'octaveSelection' },
                 Minus: { action: 'intervalSelection' },
-                Plus: { action: 'sequencerPlayPause' }
+                Plus: { action: 'toneCycle' }
             }
         };
 
@@ -183,7 +180,7 @@
         const modeSelectionMap = { '1': 'ionian', '2': 'dorian', '3': 'phrygian', '4': 'lydian', '5': 'mixolydian', '6': 'aeolian', '7': 'locrian' };
         const intervalSelectionMap = { '0': 'random', '1': 'original', '5': 'withFifth' };
         const octaveSelectionMap = { '1': 1, '2': -1 };
-        const sequencerControlMap = { 'KeyC': 'startRecording', 'KeyD': 'clearSequence' };
+        const sequencerControlMap = { 'KeyC': 'sequencerPlayPause', 'KeyD': 'clearSequence' };
 
         // Initialize MIDI
         function initMidi() {
@@ -192,10 +189,10 @@
                     (midiAccess) => {
                         const outputs = Array.from(midiAccess.outputs.values());
                         if (outputs.length === 0) {
-                            document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = 'MIDI Status: No devices found. Connect a MIDI device or enable IAC Driver.';
+                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: No devices found. Connect a MIDI device or enable IAC Driver.';
                         } else if (outputs.length === 1) {
                             midiOutput = outputs[0];
-                            document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
+                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
                         } else {
                             const select = document.getElementById('midi-select');
                             select.innerHTML = '<option value="">Select MIDI Port</option>';
@@ -206,24 +203,24 @@
                                 select.appendChild(option);
                             });
                             select.classList.remove('hidden');
-                            document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = 'MIDI Status: Select a port';
+                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: Select a port';
                             select.addEventListener('change', (event) => {
                                 const index = parseInt(event.target.value);
                                 if (index >= 0) {
                                     midiOutput = outputs[index];
-                                    document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
+                                    document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
                                 }
                             });
                         }
                     },
                     (err) => {
                         const message = `MIDI Status: Permissions blocked. Serve over HTTPS and enable MIDI in Chrome settings (chrome://settings/content/midiDevices). Error: ${err.message}`;
-                        document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = message;
+                        document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = message;
                         console.error(`MIDI Access Error: ${err.message}`);
                     }
                 );
             } else {
-                document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = 'MIDI Status: Web MIDI not supported. Use Chrome and serve over HTTPS.';
+                document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: Web MIDI not supported. Use Chrome and serve over HTTPS.';
             }
         }
 
@@ -240,16 +237,18 @@
             return `${note}${octave}`;
         }
 
-        // Update displays
+        // Update tonic display
         function updateTonicDisplay() {
             const tonicMidiNote = 60 + currentKey;
             document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Tonic: ${midiToNoteName(tonicMidiNote)}`;
         }
 
+        // Update mode display
         function updateModeDisplay() {
             document.querySelector('p.text-center.mb-2:nth-child(3)').textContent = `Mode: ${currentMode.charAt(0).toUpperCase() + currentMode.slice(1)}`;
         }
 
+        // Update intervals display
         function updateIntervalsDisplay() {
             const degrees = ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(key => keyMappings[currentKeypadLayout][`Numpad${key}`].degree);
             const intervalLabels = degrees.map((degree, i) => {
@@ -267,10 +266,12 @@
             document.querySelector('p.text-center.mb-2:nth-child(4)').textContent = `Intervals: ${intervalLabels.join(', ')}`;
         }
 
+        // Update octave offset display
         function updateOctaveOffsetDisplay() {
             document.querySelector('p.text-center.mb-2:nth-child(5)').textContent = `Top Row Octave Offset: ${topRowOctaveOffset}`;
         }
 
+        // Update sequencer display
         function updateSequencerDisplay() {
             document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `Sequencer: ${sequencerState.charAt(0).toUpperCase() + sequencerState.slice(1)} (${sequencerSteps} steps, ${sequencerTempo} BPM)`;
         }
@@ -287,11 +288,11 @@
             selectedDegrees.sort((a, b) => a - b);
             const descendingDegrees = selectedDegrees.map(d => -d - 1).sort((a, b) => b - a);
             return [
-                sequencerState === 'playing' ? -12 : 0, // 0 key: octave down in play mode
                 descendingDegrees[0],
                 descendingDegrees[1],
                 descendingDegrees[2],
-                sequencerState === 'playing' ? 12 : -1, // 5 key: octave up in play mode
+                descendingDegrees[3],
+                0,
                 selectedDegrees[0],
                 selectedDegrees[1],
                 selectedDegrees[2],
@@ -305,13 +306,9 @@
             if (type === 'random') {
                 newDegrees = generateRandomIntervals();
             } else if (type === 'withFifth') {
-                newDegrees = sequencerState === 'playing' ?
-                    [-12, -4, -3, -2, 12, 0, 1, 2, 3, 4] :
-                    [0, -4, -3, -2, -1, 0, 1, 2, 3, 4];
+                newDegrees = [0, -4, -3, -2, -1, 0, 1, 2, 3, 4];
             } else {
-                newDegrees = sequencerState === 'playing' ?
-                    [-12, -5, -3, -2, 12, 0, 1, 2, 3, 5] :
-                    [0, -5, -3, -2, -1, 0, 1, 2, 3, 5];
+                newDegrees = [0, -5, -3, -2, -1, 0, 1, 2, 3, 5];
             }
             ['Numpad0', 'Numpad1', 'Numpad2', 'Numpad3', 'Numpad4', 'Numpad5', 'Numpad6', 'Numpad7', 'Numpad8', 'Numpad9',
              '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -369,11 +366,10 @@
                 const note = sequence[currentSequencerIndex % sequence.length];
                 currentSequencerNote = note.midiNote;
                 stopNote('sequencer');
-                startNote(0, 'sequencer', false, true, currentSequencerNote);
-                currentSequencerIndex = (currentSequencerIndex + 1) % sequence.length;
+                startNote(0, 'sequencer', false, true, note.midiNote); // Play sequencer note
+                currentSequencerIndex = (currentSequencerIndex + 1) % sequencerSteps;
             }, intervalMs);
             updateSequencerDisplay();
-            setIntervals('original');
             console.log('Sequencer started');
         }
 
@@ -385,7 +381,6 @@
             sequencerState = 'stopped';
             stopNote('sequencer');
             updateSequencerDisplay();
-            setIntervals('original');
             console.log('Sequencer stopped');
         }
 
@@ -407,14 +402,12 @@
                 updateSequencerDisplay();
                 console.log('Recording started');
             }
-            setIntervals('original');
         }
 
         function startRecording() {
             sequencerState = 'recording';
             sequence = [];
             updateSequencerDisplay();
-            setIntervals('original');
             console.log('Recording started (overwrite)');
         }
 
@@ -436,16 +429,14 @@
 
             let midiNote;
             if (sequencerState === 'playing' && isNumpad) {
-                midiNote = sequencerNote || currentSequencerNote;
-                if (!isTonic && degree !== -12 && degree !== 12) { // -12 for Numpad0, 12 for Numpad5 in play mode
+                midiNote = currentSequencerNote;
+                if (!isTonic) {
                     const modeIntervals = modes[currentMode];
                     const degreeIndex = degree % 7;
                     const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
                     const octaveOffset = Math.floor(degree / 7) * 12;
                     const interval = modeIntervals[normalizedDegreeIndex];
                     midiNote += interval + octaveOffset;
-                } else {
-                    midiNote += degree; // -12 for octave down, 12 for octave up
                 }
             } else if (isNumpad) {
                 midiNote = 60 + currentKey;
@@ -556,22 +547,13 @@
                 activeOscillators.set(key, { oscillator, gainNode, midiNote });
             }
 
-            document.querySelector('p.text-center.mb-2:nth-child(1)').textContent = `Current Note: ${midiToNoteName(midiNote)}`;
-
-            // Record note if in recording mode
-            if (sequencerState === 'recording' && isNumpad && !sequencerNote) {
-                if (sequence.length < sequencerSteps) {
-                    sequence.push({ midiNote, timestamp: Date.now() });
-                    console.log(`Recorded note: ${midiNote}`);
-                } else {
-                    console.log('Sequence full');
-                }
-            }
+            updateChordDisplay();
+            if (isTonic) updateTonicDisplay();
 
             return { degree, midiNote };
         }
 
-        // Stop note
+        // Stop playing a note and send MIDI Note Off
         function stopNote(key) {
             const noteData = activeOscillators.get(key) || {};
             const { oscillator, oscillators, gainNode, midiNote } = noteData;
@@ -592,13 +574,15 @@
                     }
                 }
                 activeOscillators.delete(key);
-                if (midiNote && key !== 'sequencer') {
-                    document.querySelector('p.text-center.mb-2:nth-child(1)').textContent = `Current Note: ${midiToNoteName(midiNote)}`;
+
+                if (midiNote) {
+                    document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: ${midiToNoteName(midiNote)}`;
                 }
+                updateChordDisplay();
             }
         }
 
-        // Update tonic
+        // Update tonic after a note is played
         function updateTonic(degree, midiNote) {
             if (midiNote <= 24 || midiNote >= 108) return;
             currentTonicDegree += degree;
@@ -609,7 +593,7 @@
             currentMode = mode;
             currentTonicDegree = 0;
             currentNote = 60 + currentKey;
-            document.querySelector('p.text-center.mb-2:nth-child(1)').textContent = `Current Note: None`;
+            document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: None`;
             updateModeDisplay();
             updateTonicDisplay();
             updateIntervalsDisplay();
@@ -621,7 +605,7 @@
             currentKey = keyOffset;
             currentTonicDegree = 0;
             currentNote = 60 + currentKey;
-            document.querySelector('p.text-center.mb-2:nth-child(1)').textContent = `Current Note: None`;
+            document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: None`;
             updateTonicDisplay();
             updateModeDisplay();
             updateIntervalsDisplay();
@@ -658,30 +642,6 @@
 
             console.log(`Keydown: key=${key}, code=${code}, shift=${shift}`);
 
-            // Handle set mode (number + F + 7/8)
-            if (keySelectionMode === 'set') {
-                if (setSelectionType) {
-                    if (code === 'Digit7' || code === 'Digit8') {
-                        const type = code === 'Digit7' ? 'tempo' : 'steps';
-                        setSequencerConfig(type, setValue);
-                        setValue = '';
-                        setSelectionType = null;
-                        keySelectionMode = null;
-                        clearTimeout(keySelectionTimeout);
-                        console.log(`Set ${type} with value: ${setValue}`);
-                    } else if (/\d/.test(key)) {
-                        setValue += key;
-                        console.log(`Set value buffer: ${setValue}`);
-                    }
-                    return;
-                } else if (code === 'Digit7' || code === 'Digit8') {
-                    setSelectionType = code === 'Digit7' ? 'tempo' : 'steps';
-                    console.log(`Entered set mode for ${setSelectionType}`);
-                    return;
-                }
-            }
-
-            // Handle selection modes
             if (keySelectionMode) {
                 if (keySelectionMode === 'key' && key in keySelectionMap) {
                     changeKey(keySelectionMap[key]);
@@ -703,17 +663,22 @@
                     console.log(`Selected octave offset: ${octaveSelectionMap[key]}`);
                     keySelectionMode = null;
                     clearTimeout(keySelectionTimeout);
-                } else if (keySelectionMode === 'sequencer' && code in sequencerControlMap) {
-                    if (sequencerControlMap[code] === 'startRecording') {
-                        startRecording();
-                    } else if (sequencerControlMap[code] === 'clearSequence') {
-                        clearSequence();
+                } else if (keySelectionMode === 'set') {
+                    if (/\d/.test(key)) {
+                        setValue += key;
+                        console.log(`Set value buffer: ${setValue}`);
+                        return;
+                    } else if (key === '7' || code === 'Digit7') {
+                        setSequencerConfig('tempo', setValue);
+                        setValue = '';
+                        keySelectionMode = null;
+                        clearTimeout(keySelectionTimeout);
+                    } else if (key === '8' || code === 'Digit8') {
+                        setSequencerConfig('steps', setValue);
+                        setValue = '';
+                        keySelectionMode = null;
+                        clearTimeout(keySelectionTimeout);
                     }
-                    keySelectionMode = null;
-                    clearTimeout(keySelectionTimeout);
-                } else if (/\d/.test(key)) {
-                    setValue += key;
-                    console.log(`Set value buffer: ${setValue}`);
                 }
                 return;
             }
@@ -722,30 +687,20 @@
             if (!shift && mapping) {
                 console.log(`Mapped action: ${mapping.action}, code=${code}`);
                 if (mapping.action === 'note') {
-                    const degree = sequencerState === 'playing' && (code === 'Numpad0' || code === '0') ? -12 :
-                                   sequencerState === 'playing' && (code === 'Numpad5' || code === '5') ? 12 :
-                                   mapping.degree;
-                    const result = startNote(degree, mapping.buttonKey, code === 'Numpad0' || code === '0' || code === 'Digit0', mapping.isNumpad);
-                    if (result && (code !== 'Numpad0' && code !== '0' && code !== 'Digit0')) {
+                    const result = startNote(mapping.degree, mapping.buttonKey, code === 'Numpad0' || code === '0' || code === 'Digit0', mapping.isNumpad);
+                    if (result && (code !== 'Numpad0' && code !== '0' && code === 'Digit0')) {
                         updateTonic(mapping.degree, result.midiNote);
                     }
                 } else if (mapping.action === 'keySelection') {
                     keySelectionMode = 'key';
-                    setValue = '';
                     keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
                     console.log('Entered key selection mode');
                 } else if (mapping.action === 'modeSelection') {
                     keySelectionMode = 'mode';
                     keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
                     console.log('Entered mode selection mode');
-                } else if (mapping.action === 'sequencerPlayPause') {
-                    if (sequencerState === 'playing') {
-                        pauseSequencer();
-                    } else if (sequencerState === 'paused') {
-                        startSequencer();
-                    } else if (sequence.length > 0) {
-                        startSequencer();
-                    }
+                } else if (mapping.action === 'toneCycle') {
+                    cycleTone();
                 } else if (mapping.action === 'intervalSelection') {
                     keySelectionMode = 'interval';
                     keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
@@ -754,8 +709,16 @@
                     keySelectionMode = 'octave';
                     keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
                     console.log('Entered octave selection mode');
-                } else if (mapping.action === 'sequencerRecordToggle') {
+                } else if (mapping.action === 'sequencerToggle') {
                     toggleSequencerRecord();
+                } else if (mapping.action === 'sequencerPlayPause') {
+                    if (sequencerState === 'playing') {
+                        pauseSequencer();
+                    } else if (sequencerState === 'paused') {
+                        startSequencer();
+                    } else if (sequence.length > 0) {
+                        startSequencer();
+                    }
                 }
             } else if (shift && modeKeyMap[key]) {
                 console.log(`Mode key matched: key=${key}, mode=${modeKeyMap[key]}`);
@@ -786,3 +749,4 @@
     </script>
 </body>
 </html>
+</xaiArtifact>
