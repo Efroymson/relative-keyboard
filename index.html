@@ -1,3 +1,4 @@
+<!-- GRK 2025-09-04: Added sequencer, removed chord -->
 <!-- GRK 2025-09-03: Added configurable key mapping for keypad layouts (default and alternate with NumLock/Clear), sequencer placeholder, and UI dropdown for layout selection -->
 <!DOCTYPE html>
 <html lang="en">
@@ -13,17 +14,9 @@
         <p class="text-center mb-2">Current Note: None</p>
         <p class="text-center mb-2">Tonic: C4</p>
         <p class="text-center mb-2">Mode: Ionian</p>
-        <p class="text-center mb-2">Chord: None</p>
         <p class="text-center mb-2">Intervals: 6th -1, 4th -1, 3rd -1, 2nd -1, Last Note, 2nd, 3rd, 4th, 6th</p>
-        <p class="text-center mb-2">Top Row Octave Offset: 0</p>
+        <p class="text-center mb-2">Sequencer: Stopped (16 steps, 120 BPM)</p>
         <p class="text-center mb-2">MIDI Status: Checking...</p>
-        <p class="text-center mb-2">Sequencer: Stopped</p>
-        <div class="flex justify-center mb-4">
-            <select id="keypad-layout" class="p-2 border rounded">
-                <option value="default">Default Keypad</option>
-                <option value="alternate">Alternate Keypad (Clear)</option>
-            </select>
-        </div>
         <div class="flex justify-center mb-4">
             <select id="midi-select" class="p-2 border rounded hidden">
                 <option value="">Select MIDI Port</option>
@@ -38,119 +31,25 @@
                 <option value="ting">Ting</option>
             </select>
         </div>
-        <p class="text-center mb-4">Serve over HTTPS (e.g., GitHub Pages) for MIDI. Use keypad 0–9 for notes (5 for last note, 1–4 descending, 6–9 ascending); top row 0–9 for notes relative to last keypad note; NumLock or Clear for key selection; / (A) for key selection, * (B) for mode, + (C) for tone cycle, - (D) for intervals; Enter for sequencer start/stop; Shift + 3–9 for modes; = + 1/2 for top row octave offset (+1/-1).</p>
+        <p class="text-center mb-4">Serve over HTTPS (e.g., Netlify) for MIDI. Use keypad or number keys 1–9 for notes (5 for last note, 2 for 6th -1, 3 for 6th -1, 1 for 3rd -1, 9 for 6th), 0 to play and reset to tonic (e.g., C4 in C major); Shift + 3–9 for modes; / + 1–7 for keys; + or keypad + to cycle tones; - or keypad - + 0 for random intervals, - + 1 for original, - + 5 for intervals with 5th; = or keypad = + 1 for +1 octave top row, = + 2 for -1 octave. For sequencer: Enter to toggle record/play, C for play/pause, D for clear; set tempo/steps with number + f + 7/8 (e.g., 160 f 7 for tempo 160).</p>
     </div>
 
     <script>
-        // Initialize Web Audio context
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        // Global state
-        let currentKey = 0;
+        let currentKey = 0; // MIDI note offset (e.g., 0 = C)
         let currentMode = 'ionian';
-        let currentTonicDegree = 0;
-        let currentNote = 60;
-        const activeOscillators = new Map();
-        let currentTone = 'sine';
-        let midiOutput = null;
-        let keySelectionMode = null;
+        let currentTonicDegree = 0; // Tracks the degree of the current tonic relative to the root key
+        let activeModeButton = null;
+        let activeKeyButton = null;
+        const activeOscillators = new Map(); // Tracks oscillators for sustain and polyphony
+        let currentTone = 'sine'; // Default tone
+        let midiOutput = null; // MIDI output device
+        let keySelectionMode = null; // null, 'key', 'mode', 'interval', 'octave', 'set'
         let keySelectionTimeout = null;
-        const tones = ['sine', 'organ', 'buzz1', 'buzz2', 'ting'];
-        let topRowOctaveOffset = 0;
-        let currentKeypadLayout = 'default';
-        let sequencerState = 'stopped';
-        const sequence = [];
+        let setSelectionType = null; // 'tempo' or 'steps' for set mode
+        let setValue = ''; // Buffer for set number input
 
-        // Keypad layout mappings
-        const keyMappings = {
-            default: {
-                Numpad0: { action: 'note', degree: 0, buttonKey: 'numpad0', isNumpad: true },
-                Numpad1: { action: 'note', degree: -5, buttonKey: '1', isNumpad: true },
-                Numpad2: { action: 'note', degree: -3, buttonKey: '2', isNumpad: true },
-                Numpad3: { action: 'note', degree: -2, buttonKey: '3', isNumpad: true },
-                Numpad4: { action: 'note', degree: -1, buttonKey: '4', isNumpad: true },
-                Numpad5: { action: 'note', degree: 0, buttonKey: '5', isNumpad: true },
-                Numpad6: { action: 'note', degree: 1, buttonKey: '6', isNumpad: true },
-                Numpad7: { action: 'note', degree: 2, buttonKey: '7', isNumpad: true },
-                Numpad8: { action: 'note', degree: 3, buttonKey: '8', isNumpad: true },
-                Numpad9: { action: 'note', degree: 5, buttonKey: '9', isNumpad: true },
-                Digit0: { action: 'note', degree: 0, buttonKey: 'digit0', isNumpad: false },
-                Digit1: { action: 'note', degree: -5, buttonKey: 'digit1', isNumpad: false },
-                Digit2: { action: 'note', degree: -3, buttonKey: 'digit2', isNumpad: false },
-                Digit3: { action: 'note', degree: -2, buttonKey: 'digit3', isNumpad: false },
-                Digit4: { action: 'note', degree: -1, buttonKey: 'digit4', isNumpad: false },
-                Digit5: { action: 'note', degree: 0, buttonKey: 'digit5', isNumpad: false },
-                Digit6: { action: 'note', degree: 1, buttonKey: 'digit6', isNumpad: false },
-                Digit7: { action: 'note', degree: 2, buttonKey: 'digit7', isNumpad: false },
-                Digit8: { action: 'note', degree: 3, buttonKey: 'digit8', isNumpad: false },
-                Digit9: { action: 'note', degree: 5, buttonKey: 'digit9', isNumpad: false },
-                NumLock: { action: 'keySelection' },
-                NumpadDivide: { action: 'keySelection' }, // / maps to A
-                NumpadMultiply: { action: 'modeSelection' }, // * maps to B
-                NumpadAdd: { action: 'toneCycle' }, // + maps to C
-                NumpadSubtract: { action: 'intervalSelection' }, // - maps to D
-                NumpadEnter: { action: 'sequencerToggle' }, // Enter for sequencer
-                '0': { action: 'note', degree: 0, buttonKey: 'numpad0', isNumpad: true },
-                '1': { action: 'note', degree: -5, buttonKey: '1', isNumpad: true },
-                '2': { action: 'note', degree: -3, buttonKey: '2', isNumpad: true },
-                '3': { action: 'note', degree: -2, buttonKey: '3', isNumpad: true },
-                '4': { action: 'note', degree: -1, buttonKey: '4', isNumpad: true },
-                '5': { action: 'note', degree: 0, buttonKey: '5', isNumpad: true },
-                '6': { action: 'note', degree: 1, buttonKey: '6', isNumpad: true },
-                '7': { action: 'note', degree: 2, buttonKey: '7', isNumpad: true },
-                '8': { action: 'note', degree: 3, buttonKey: '8', isNumpad: true },
-                '9': { action: 'note', degree: 5, buttonKey: '9', isNumpad: true },
-                Slash: { action: 'keySelection' }, // / (alternate for A)
-                Asterisk: { action: 'modeSelection' }, // * (alternate for B)
-                Equal: { action: 'octaveSelection' }, // = for octave offset
-                Minus: { action: 'intervalSelection' }, // - (alternate for D)
-                Plus: { action: 'toneCycle' } // + (alternate for C)
-            },
-            alternate: {
-                Numpad0: { action: 'note', degree: 0, buttonKey: 'numpad0', isNumpad: true },
-                Numpad1: { action: 'note', degree: -5, buttonKey: '1', isNumpad: true },
-                Numpad2: { action: 'note', degree: -3, buttonKey: '2', isNumpad: true },
-                Numpad3: { action: 'note', degree: -2, buttonKey: '3', isNumpad: true },
-                Numpad4: { action: 'note', degree: -1, buttonKey: '4', isNumpad: true },
-                Numpad5: { action: 'note', degree: 0, buttonKey: '5', isNumpad: true },
-                Numpad6: { action: 'note', degree: 1, buttonKey: '6', isNumpad: true },
-                Numpad7: { action: 'note', degree: 2, buttonKey: '7', isNumpad: true },
-                Numpad8: { action: 'note', degree: 3, buttonKey: '8', isNumpad: true },
-                Numpad9: { action: 'note', degree: 5, buttonKey: '9', isNumpad: true },
-                Digit0: { action: 'note', degree: 0, buttonKey: 'digit0', isNumpad: false },
-                Digit1: { action: 'note', degree: -5, buttonKey: 'digit1', isNumpad: false },
-                Digit2: { action: 'note', degree: -3, buttonKey: 'digit2', isNumpad: false },
-                Digit3: { action: 'note', degree: -2, buttonKey: 'digit3', isNumpad: false },
-                Digit4: { action: 'note', degree: -1, buttonKey: 'digit4', isNumpad: false },
-                Digit5: { action: 'note', degree: 0, buttonKey: 'digit5', isNumpad: false },
-                Digit6: { action: 'note', degree: 1, buttonKey: 'digit6', isNumpad: false },
-                Digit7: { action: 'note', degree: 2, buttonKey: 'digit7', isNumpad: false },
-                Digit8: { action: 'note', degree: 3, buttonKey: 'digit8', isNumpad: false },
-                Digit9: { action: 'note', degree: 5, buttonKey: 'digit9', isNumpad: false },
-                Clear: { action: 'keySelection' }, // Alternate for NumLock
-                NumpadDivide: { action: 'keySelection' },
-                NumpadMultiply: { action: 'modeSelection' },
-                NumpadAdd: { action: 'toneCycle' },
-                NumpadSubtract: { action: 'intervalSelection' },
-                NumpadEnter: { action: 'sequencerToggle' },
-                '0': { action: 'note', degree: 0, buttonKey: 'numpad0', isNumpad: true },
-                '1': { action: 'note', degree: -5, buttonKey: '1', isNumpad: true },
-                '2': { action: 'note', degree: -3, buttonKey: '2', isNumpad: true },
-                '3': { action: 'note', degree: -2, buttonKey: '3', isNumpad: true },
-                '4': { action: 'note', degree: -1, buttonKey: '4', isNumpad: true },
-                '5': { action: 'note', degree: 0, buttonKey: '5', isNumpad: true },
-                '6': { action: 'note', degree: 1, buttonKey: '6', isNumpad: true },
-                '7': { action: 'note', degree: 2, buttonKey: '7', isNumpad: true },
-                '8': { action: 'note', degree: 3, buttonKey: '8', isNumpad: true },
-                '9': { action: 'note', degree: 5, buttonKey: '9', isNumpad: true },
-                Slash: { action: 'keySelection' },
-                Asterisk: { action: 'modeSelection' },
-                Equal: { action: 'octaveSelection' },
-                Minus: { action: 'intervalSelection' },
-                Plus: { action: 'toneCycle' }
-            }
-        };
-
-        // Modes
+        // Define modes (intervals relative to tonic in semitones)
         const modes = {
             ionian: [0, 2, 4, 5, 7, 9, 11],
             dorian: [0, 2, 3, 5, 7, 9, 10],
@@ -161,103 +60,12 @@
             locrian: [0, 1, 3, 5, 6, 8, 10]
         };
 
-        // Mode key map for Shift + top-row
-        const modeKeyMap = {
-            '#': 'ionian',
-            '$': 'dorian',
-            '^': 'phrygian',
-            '%': 'lydian',
-            '&': 'mixolydian',
-            '*': 'aeolian',
-            '(': 'locrian'
-        };
-
-        // Selection maps
-        const keySelectionMap = { '1': 0, '2': 2, '3': 4, '4': 5, '5': 7, '6': 9, '7': 11 };
-        const modeSelectionMap = { '1': 'ionian', '2': 'dorian', '3': 'phrygian', '4': 'lydian', '5': 'mixolydian', '6': 'aeolian', '7': 'locrian' };
-        const intervalSelectionMap = { '0': 'random', '1': 'original', '5': 'withFifth' };
-        const octaveSelectionMap = { '1': 1, '2': -1 };
-
-        // Chord detection
-        const chordTemplates = {
-            'major': [0, 4, 7],
-            'minor': [0, 3, 7],
-            'diminished': [0, 3, 6],
-            'augmented': [0, 4, 8],
-            'sus2': [0, 2, 7],
-            'sus4': [0, 5, 7]
-        };
-
-        function detectChord(notes) {
-            if (notes.length < 2) return 'None';
-            notes = notes.sort((a, b) => a - b);
-            for (const root of notes) {
-                const intervals = notes.map(note => (note - root) % 12).sort((a, b) => a - b);
-                for (const [type, template] of Object.entries(chordTemplates)) {
-                    if (template.every(interval => intervals.includes(interval))) {
-                        return `${midiToNoteName(root)} ${type}`;
-                    }
-                }
-            }
-            if (notes.length === 2) {
-                const interval = Math.abs((notes[1] - notes[0]) % 12);
-                if (interval === 3 || interval === 4) {
-                    const root = Math.min(...notes);
-                    const type = interval === 4 ? 'major' : 'minor';
-                    return `${midiToNoteName(root)} ${type} (partial)`;
-                }
-            }
-            return 'None';
-        }
-
-        // Initialize MIDI
-        function initMidi() {
-            if (navigator.requestMIDIAccess) {
-                navigator.requestMIDIAccess().then(
-                    (midiAccess) => {
-                        const outputs = Array.from(midiAccess.outputs.values());
-                        if (outputs.length === 0) {
-                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: No devices found. Connect a MIDI device or enable IAC Driver.';
-                        } else if (outputs.length === 1) {
-                            midiOutput = outputs[0];
-                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
-                        } else {
-                            const select = document.getElementById('midi-select');
-                            select.innerHTML = '<option value="">Select MIDI Port</option>';
-                            outputs.forEach((output, index) => {
-                                const option = document.createElement('option');
-                                option.value = index;
-                                option.textContent = output.name;
-                                select.appendChild(option);
-                            });
-                            select.classList.remove('hidden');
-                            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: Select a port';
-                            select.addEventListener('change', (event) => {
-                                const index = parseInt(event.target.value);
-                                if (index >= 0) {
-                                    midiOutput = outputs[index];
-                                    document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `MIDI Status: Connected to ${midiOutput.name}`;
-                                }
-                            });
-                        }
-                    },
-                    (err) => {
-                        const message = `MIDI Status: Permissions blocked. Serve over HTTPS and enable MIDI in Chrome settings (chrome://settings/content/midiDevices). Error: ${err.message}`;
-                        document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = message;
-                        console.error(`MIDI Access Error: ${err.message}`);
-                    }
-                );
-            } else {
-                document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = 'MIDI Status: Web MIDI not supported. Use Chrome and serve over HTTPS.';
-            }
-        }
-
         // Convert MIDI note to frequency
         function midiToFreq(midiNote) {
             return 440 * Math.pow(2, (midiNote - 69) / 12);
         }
 
-        // Convert MIDI note to note name
+        // Convert MIDI note to note name (e.g., 60 -> C4)
         function midiToNoteName(midiNote) {
             const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
             const note = noteNames[midiNote % 12];
@@ -265,321 +73,133 @@
             return `${note}${octave}`;
         }
 
-        // Update displays
-        function updateTonicDisplay() {
-            const tonicMidiNote = 60 + currentKey;
-            document.querySelector('p.text-center.mb-2:nth-child(3)').textContent = `Tonic: ${midiToNoteName(tonicMidiNote)}`;
-        }
-
-        function updateModeDisplay() {
-            document.querySelector('p.text-center.mb-2:nth-child(4)').textContent = `Mode: ${currentMode.charAt(0).toUpperCase() + currentMode.slice(1)}`;
-        }
-
-        function updateChordDisplay() {
-            const notes = Array.from(activeOscillators.values()).map(data => data.midiNote);
-            const chord = detectChord(notes);
-            document.querySelector('p.text-center.mb-2:nth-child(5)').textContent = `Chord: ${chord}`;
-        }
-
-        function updateIntervalsDisplay() {
-            const degrees = ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(key => keyMappings[currentKeypadLayout][`Numpad${key}`].degree);
-            const intervalLabels = degrees.map((degree, i) => {
-                if (degree === 0) return i === 4 ? 'Last Note' : 'Tonic';
-                const modeIntervals = modes[currentMode];
-                const degreeIndex = degree % 7;
-                const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
-                const interval = modeIntervals[normalizedDegreeIndex];
-                const octave = Math.floor(degree / 7);
-                const intervalNames = ['Tonic', '2nd', '3rd', '4th', '5th', '6th', '7th'];
-                return `${intervalNames[normalizedDegreeIndex]}${octave < 0 ? ' -1' : ''}`;
+        // Update note key labels
+        function updateNoteLabels() {
+            const labels = ['6th -1 (1)', '4th -1 (2)', '3rd -1 (3)', '2nd -1 (4)', 'Last Note (5)', '2nd (6)', '3rd (7)', '4th (8)', '6th (9)'];
+            document.querySelectorAll('.note-key').forEach((button, index) => {
+                button.textContent = labels[index];
             });
-            document.querySelector('p.text-center.mb-2:nth-child(6)').textContent = `Intervals: ${intervalLabels.join(', ')}`;
         }
 
-        function updateOctaveOffsetDisplay() {
-            document.querySelector('p.text-center.mb-2:nth-child(7)').textContent = `Top Row Octave Offset: ${topRowOctaveOffset}`;
-        }
+        // Create a note with the selected tone
+        function startNote(degree, button = null) {
+            const key = button ? button.dataset.key : null;
+            if (key && activeOscillators.has(key)) return;
 
-        function updateSequencerDisplay() {
-            document.querySelector('p.text-center.mb-2:nth-child(8)').textContent = `Sequencer: ${sequencerState.charAt(0).toUpperCase() + sequencerState.slice(1)}`;
-        }
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.type = 'sine';
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
 
-        // Generate random intervals
-        function generateRandomIntervals() {
+            // Calculate MIDI note relative to the current tonic
             const modeIntervals = modes[currentMode];
-            const availableDegrees = [0, 1, 2, 3, 4, 5, 6];
-            const selectedDegrees = [];
-            while (selectedDegrees.length < 4) {
-                const index = Math.floor(Math.random() * availableDegrees.length);
-                selectedDegrees.push(availableDegrees.splice(index, 1)[0]);
-            }
-            selectedDegrees.sort((a, b) => a - b);
-            const descendingDegrees = selectedDegrees.map(d => -d - 1).sort((a, b) => b - a);
-            return [
-                descendingDegrees[0],
-                descendingDegrees[1],
-                descendingDegrees[2],
-                descendingDegrees[3],
-                0,
-                selectedDegrees[0],
-                selectedDegrees[1],
-                selectedDegrees[2],
-                selectedDegrees[3]
-            ];
-        }
+            const degreeIndex = (currentTonicDegree + degree) % 7;
+            const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
+            const octaveOffset = Math.floor((currentTonicDegree + degree) / 7) * 12;
+            const interval = modeIntervals[normalizedDegreeIndex];
+            const midiNote = 60 + currentKey + interval + octaveOffset;
 
-        // Set intervals
-        function setIntervals(type) {
-            let newDegrees;
-            if (type === 'random') {
-                newDegrees = generateRandomIntervals();
-            } else if (type === 'withFifth') {
-                newDegrees = [0, -4, -3, -2, -1, 0, 1, 2, 3, 4];
-            } else {
-                newDegrees = [0, -5, -3, -2, -1, 0, 1, 2, 3, 5];
-            }
-            ['Numpad0', 'Numpad1', 'Numpad2', 'Numpad3', 'Numpad4', 'Numpad5', 'Numpad6', 'Numpad7', 'Numpad8', 'Numpad9',
-             '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-             'Digit0', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9'
-            ].forEach((key, i) => {
-                if (keyMappings[currentKeypadLayout][key]) {
-                    keyMappings[currentKeypadLayout][key].degree = newDegrees[i % 10];
-                }
-            });
-            updateIntervalsDisplay();
-            activeOscillators.forEach((_, key) => stopNote(key));
-        }
-
-        // Set octave offset
-        function setOctaveOffset(offset) {
-            topRowOctaveOffset = offset;
-            updateOctaveOffsetDisplay();
-            activeOscillators.forEach((_, key) => stopNote(key));
-        }
-
-        // Cycle tones
-        function cycleTone() {
-            const currentIndex = tones.indexOf(currentTone);
-            currentTone = tones[(currentIndex + 1) % tones.length];
-            document.getElementById('tone-select').value = currentTone;
-            activeOscillators.forEach((_, key) => stopNote(key));
-            console.log(`Cycled to tone: ${currentTone}`);
-        }
-
-        // Placeholder for sequencer toggle
-        function toggleSequencer() {
-            sequencerState = sequencerState === 'stopped' ? 'recording' : 'stopped';
-            updateSequencerDisplay();
-            console.log(`Sequencer: ${sequencerState}`);
-        }
-
-        // Start note
-        function startNote(degree, buttonKey = null, isTonic = false, isNumpad = true) {
-            const key = buttonKey || (isNumpad ? 'numpad0' : 'digit0');
-            if (activeOscillators.has(key)) return;
-
-            if (isTonic) currentTonicDegree = 0;
-
-            let midiNote;
-            if (isNumpad) {
-                midiNote = 60 + currentKey;
-                if (!isTonic) {
-                    const modeIntervals = modes[currentMode];
-                    const degreeIndex = (currentTonicDegree + degree) % 7;
-                    const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
-                    const octaveOffset = Math.floor((currentTonicDegree + degree) / 7) * 12;
-                    const interval = modeIntervals[normalizedDegreeIndex];
-                    midiNote = 60 + currentKey + interval + octaveOffset;
-                }
-            } else {
-                midiNote = currentNote + topRowOctaveOffset * 12;
-                if (!isTonic) {
-                    const modeIntervals = modes[currentMode];
-                    const degreeIndex = degree % 7;
-                    const normalizedDegreeIndex = degreeIndex >= 0 ? degreeIndex : degreeIndex + 7;
-                    const octaveOffset = Math.floor(degree / 7) * 12;
-                    const interval = modeIntervals[normalizedDegreeIndex];
-                    midiNote += interval + octaveOffset;
-                }
-            }
-
-            // Clamp MIDI note
-            if (midiNote < 24 || midiNote > 108) {
-                midiNote = Math.max(24, Math.min(108, midiNote));
-                console.log(`Clamped MIDI note to ${midiNote}`);
-                return;
-            }
-
-            // Update currentNote for numpad
-            if (isNumpad) currentNote = midiNote;
-
-            // Send MIDI Note On
-            if (midiOutput) {
-                try {
-                    midiOutput.send([0x90, midiNote, 100]);
-                } catch (e) {
-                    console.error(`MIDI Note On error: ${e.message}`);
-                }
-            }
-
-            // Web Audio
-            const frequency = midiToFreq(midiNote);
-            const now = audioCtx.currentTime;
-            let oscillator, gainNode, oscillators;
-            if (currentTone === 'sine') {
-                oscillator = audioCtx.createOscillator();
-                gainNode = audioCtx.createGain();
-                oscillator.type = 'sine';
-                oscillator.frequency.setValueAtTime(frequency, now);
-                gainNode.gain.setValueAtTime(0, now);
-                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
-                oscillator.connect(gainNode);
-                gainNode.connect(audioCtx.destination);
+            // Ensure MIDI note is within C2 (36) to C7 (96)
+            if (midiNote >= 36 && midiNote <= 96) {
+                oscillator.frequency.setValueAtTime(midiToFreq(midiNote), audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
                 oscillator.start();
-                activeOscillators.set(key, { oscillator, gainNode, midiNote });
-            } else if (currentTone === 'organ') {
-                oscillators = [];
-                gainNode = audioCtx.createGain();
-                [1, 2, 3].forEach(harmonic => {
-                    const osc = audioCtx.createOscillator();
-                    osc.type = 'sine';
-                    osc.frequency.setValueAtTime(frequency * harmonic, now);
-                    osc.connect(gainNode);
-                    oscillators.push(osc);
-                });
-                gainNode.gain.setValueAtTime(0, now);
-                gainNode.gain.linearRampToValueAtTime(0.2, now + 0.005);
-                gainNode.connect(audioCtx.destination);
-                oscillators.forEach(osc => osc.start());
-                activeOscillators.set(key, { oscillators, gainNode, midiNote });
-            } else if (currentTone === 'buzz1') {
-                oscillator = audioCtx.createOscillator();
-                gainNode = audioCtx.createGain();
-                oscillator.type = 'sawtooth';
-                oscillator.frequency.setValueAtTime(frequency, now);
-                gainNode.gain.setValueAtTime(0, now);
-                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
-                gainNode.gain.exponentialRampToValueAtTime(0.1, now + 0.5);
-                oscillator.connect(gainNode);
-                gainNode.connect(audioCtx.destination);
-                oscillator.start();
-                activeOscillators.set(key, { oscillator, gainNode, midiNote });
-            } else if (currentTone === 'buzz2') {
-                oscillator = audioCtx.createOscillator();
-                gainNode = audioCtx.createGain();
-                oscillator.type = 'square';
-                oscillator.frequency.setValueAtTime(frequency, now);
-                gainNode.gain.setValueAtTime(0, now);
-                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
-                gainNode.gain.exponentialRampToValueAtTime(0.05, now + 0.3);
-                oscillator.connect(gainNode);
-                gainNode.connect(audioCtx.destination);
-                oscillator.start();
-                activeOscillators.set(key, { oscillator, gainNode, midiNote });
-            } else if (currentTone === 'ting') {
-                oscillator = audioCtx.createOscillator();
-                gainNode = audioCtx.createGain();
-                oscillator.type = 'triangle';
-                oscillator.frequency.setValueAtTime(frequency, now);
-                gainNode.gain.setValueAtTime(0, now);
-                gainNode.gain.linearRampToValueAtTime(0.3, now + 0.005);
-                gainNode.gain.exponentialRampToValueAtTime(0.05, now + 0.3);
-                oscillator.connect(gainNode);
-                gainNode.connect(audioCtx.destination);
-                oscillator.start();
-                activeOscillators.set(key, { oscillator, gainNode, midiNote });
+
+                if (key) {
+                    activeOscillators.set(key, { oscillator, gainNode });
+                }
+
+                if (button) {
+                    button.classList.add('bg-blue-800');
+                }
+
+                return { degree, button };
             }
-
-            updateChordDisplay();
-            if (isTonic) updateTonicDisplay();
-
-            // Sequencer placeholder: record note if active
-            if (sequencerState === 'recording') {
-                sequence.push({ midiNote, timestamp: Date.now() });
-                console.log(`Recorded note: ${midiNote}`);
-            }
-
-            return { degree, midiNote };
+            return null;
         }
 
-        // Stop note
+        // Stop playing a note
         function stopNote(key) {
-            const noteData = activeOscillators.get(key) || {};
-            const { oscillator, oscillators, gainNode, midiNote } = noteData;
-            if (gainNode) {
-                const now = audioCtx.currentTime;
-                gainNode.gain.setValueAtTime(gainNode.gain.value, now);
-                gainNode.gain.linearRampToValueAtTime(0.001, now + 0.005);
-                if (oscillator) {
-                    oscillator.stop(now + 0.005);
-                } else if (oscillators) {
-                    oscillators.forEach(osc => osc.stop(now + 0.005));
-                }
-                if (midiOutput && midiNote) {
-                    try {
-                        midiOutput.send([0x80, midiNote, 0]);
-                    } catch (e) {
-                        console.error(`MIDI Note Off error: ${e.message}`);
-                    }
-                }
+            const { oscillator, gainNode } = activeOscillators.get(key) || {};
+            if (oscillator) {
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.1);
+                oscillator.stop(audioCtx.currentTime + 0.1);
                 activeOscillators.delete(key);
-                if (midiNote) {
-                    document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: ${midiToNoteName(midiNote)}`;
+
+                const button = document.querySelector(`.note-key[data-key="${key}"]`);
+                if (button) {
+                    button.classList.remove('bg-blue-800');
                 }
-                updateChordDisplay();
             }
         }
 
-        // Update tonic
-        function updateTonic(degree, midiNote) {
-            if (midiNote <= 24 || midiNote >= 108) return;
+        // Update tonic after a note is played
+        function updateTonic(degree) {
             currentTonicDegree += degree;
         }
 
-        // Change mode
-        function changeMode(mode) {
+        // Change mode and update button state
+        function changeMode(mode, button) {
+            if (activeModeButton) {
+                activeModeButton.classList.remove('bg-green-700');
+                activeModeButton.classList.add('bg-green-500');
+            }
+            button.classList.remove('bg-green-500');
+            button.classList.add('bg-green-700');
+            activeModeButton = button;
             currentMode = mode;
-            currentTonicDegree = 0;
-            currentNote = 60 + currentKey;
-            document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: None`;
-            updateModeDisplay();
-            updateTonicDisplay();
-            updateIntervalsDisplay();
-            activeOscillators.forEach((_, key) => stopNote(key));
+            currentTonicDegree = 0; // Reset tonic degree when mode changes
+            updateNoteLabels();
+
+            button.classList.add('bg-green-800');
+            setTimeout(() => button.classList.remove('bg-green-800'), 100);
         }
 
-        // Change key
-        function changeKey(keyOffset) {
-            currentKey = keyOffset;
-            currentTonicDegree = 0;
-            currentNote = 60 + currentKey;
-            document.querySelector('p.text-center.mb-2:nth-child(2)').textContent = `Current Note: None`;
-            updateTonicDisplay();
-            updateModeDisplay();
-            updateIntervalsDisplay();
-            activeOscillators.forEach((_, key) => stopNote(key));
-        }
-
-        // Initialize MIDI and displays
-        initMidi();
-        updateTonicDisplay();
-        updateModeDisplay();
-        updateIntervalsDisplay();
-        updateOctaveOffsetDisplay();
-        updateSequencerDisplay();
-
-        // Handle keypad layout selection
-        document.getElementById('keypad-layout').addEventListener('change', (event) => {
-            currentKeypadLayout = event.target.value;
-            updateIntervalsDisplay();
-            activeOscillators.forEach((_, key) => stopNote(key));
-            console.log(`Keypad layout changed to: ${currentKeypadLayout}`);
+        // Handle note key clicks
+        document.querySelectorAll('.note-key').forEach(button => {
+            button.addEventListener('mousedown', () => {
+                const degree = parseInt(button.dataset.degree);
+                const result = startNote(degree, button);
+                if (result) {
+                    updateTonic(degree);
+                }
+            });
+            button.addEventListener('mouseup', () => {
+                stopNote(button.dataset.key);
+            });
         });
 
-        // Handle tone selection
-        document.getElementById('tone-select').addEventListener('change', (event) => {
-            currentTone = event.target.value;
-            activeOscillators.forEach((_, key) => stopNote(key));
+        // Handle mode key clicks
+        document.querySelectorAll('.mode-key').forEach(button => {
+            button.addEventListener('click', () => {
+                changeMode(button.dataset.mode, button);
+            });
+        });
+
+        // Handle key key clicks
+        document.querySelectorAll('.key-key').forEach(button => {
+            button.addEventListener('click', () => {
+                if (activeKeyButton) {
+                    activeKeyButton.classList.remove('bg-purple-700');
+                    activeKeyButton.classList.add('bg-purple-500');
+                }
+                button.classList.remove('bg-purple-500');
+                button.classList.add('bg-purple-700');
+                activeKeyButton = button;
+                currentKey = parseInt(button.dataset.key);
+                currentTonicDegree = 0; // Reset tonic degree when key changes
+                updateNoteLabels();
+
+                button.classList.add('bg-purple-600');
+                setTimeout(() => button.classList.remove('bg-purple-600'), 100);
+            });
+        });
+
+        // Log all note-key data-key values for debugging
+        console.log('Note keys in DOM:');
+        document.querySelectorAll('.note-key').forEach(button => {
+            console.log(`- data-key="${button.dataset.key}", degree=${button.dataset.degree}`);
         });
 
         // Keyboard input handling
@@ -590,63 +210,50 @@
 
             console.log(`Keydown: key=${key}, code=${code}, shift=${shift}`);
 
-            if (keySelectionMode) {
-                if (keySelectionMode === 'key' && key in keySelectionMap) {
-                    changeKey(keySelectionMap[key]);
-                    console.log(`Selected key: offset=${keySelectionMap[key]}`);
-                    keySelectionMode = null;
-                    clearTimeout(keySelectionTimeout);
-                } else if (keySelectionMode === 'mode' && key in modeSelectionMap) {
-                    changeMode(modeSelectionMap[key]);
-                    console.log(`Selected mode: ${modeSelectionMap[key]}`);
-                    keySelectionMode = null;
-                    clearTimeout(keySelectionTimeout);
-                } else if (keySelectionMode === 'interval' && key in intervalSelectionMap) {
-                    setIntervals(intervalSelectionMap[key]);
-                    console.log(`Selected intervals: ${intervalSelectionMap[key]}`);
-                    keySelectionMode = null;
-                    clearTimeout(keySelectionTimeout);
-                } else if (keySelectionMode === 'octave' && key in octaveSelectionMap) {
-                    setOctaveOffset(octaveSelectionMap[key]);
-                    console.log(`Selected octave offset: ${octaveSelectionMap[key]}`);
-                    keySelectionMode = null;
-                    clearTimeout(keySelectionTimeout);
-                }
-                return;
-            }
+            // Note keys (using event.code)
+            const noteKeyMap = {
+                'Digit5': { degree: 0, buttonKey: 'r' },  // Tonic (5)
+                'KeyR': { degree: 0, buttonKey: 'r' },    // Tonic (r)
+                'KeyT': { degree: 0, buttonKey: 'r' },    // Tonic (t)
+                'Digit2': { degree: -6, buttonKey: '2' }, // 6th -1
+                'Digit3': { degree: -4, buttonKey: '3' }, // 5th -1
+                'Digit4': { degree: -2, buttonKey: '4' }, // 7th
+                'Digit6': { degree: 2, buttonKey: '6' },  // 2nd
+                'Digit7': { degree: 4, buttonKey: '7' },  // 3rd
+                'Digit8': { degree: 6, buttonKey: '8' }   // 4th
+            };
 
-            const mapping = keyMappings[currentKeypadLayout][code];
-            if (!shift && mapping) {
-                console.log(`Mapped action: ${mapping.action}, code=${code}`);
-                if (mapping.action === 'note') {
-                    const result = startNote(mapping.degree, mapping.buttonKey, code === 'Numpad0' || code === '0' || code === 'Digit0', mapping.isNumpad);
-                    if (result && (code !== 'Numpad0' && code !== '0' && code !== 'Digit0')) {
-                        updateTonic(mapping.degree, result.midiNote);
-                    }
-                } else if (mapping.action === 'keySelection') {
-                    keySelectionMode = 'key';
-                    keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
-                    console.log('Entered key selection mode');
-                } else if (mapping.action === 'modeSelection') {
-                    keySelectionMode = 'mode';
-                    keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
-                    console.log('Entered mode selection mode');
-                } else if (mapping.action === 'toneCycle') {
-                    cycleTone();
-                } else if (mapping.action === 'intervalSelection') {
-                    keySelectionMode = 'interval';
-                    keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
-                    console.log('Entered interval selection mode');
-                } else if (mapping.action === 'octaveSelection') {
-                    keySelectionMode = 'octave';
-                    keySelectionTimeout = setTimeout(() => keySelectionMode = null, 2000);
-                    console.log('Entered octave selection mode');
-                } else if (mapping.action === 'sequencerToggle') {
-                    toggleSequencer();
+            // Mode keys (using event.key)
+            const modeKeyMap = {
+                '#': 'ionian',
+                '$': 'dorian',
+                '^': 'phrygian',
+                '%': 'lydian',
+                '&': 'mixolydian',
+                '*': 'aeolian',
+                '(': 'locrian'
+            };
+
+            if (!shift && noteKeyMap[code]) {
+                console.log(`Note key matched: code=${code}, degree=${noteKeyMap[code].degree}, buttonKey=${noteKeyMap[code].buttonKey}`);
+                const query = `.note-key[data-key="${noteKeyMap[code].buttonKey}"]`;
+                console.log(`Querying: ${query}`);
+                const button = document.querySelector(query) || document.querySelector('.note-key[data-degree="0"]');
+                if (button) {
+                    console.log(`Button found for data-key="${noteKeyMap[code].buttonKey}"`);
+                    const degree = parseInt(button.dataset.degree);
+                    startNote(degree, button);
+                } else {
+                    console.log(`No button found for query: ${query}`);
                 }
             } else if (shift && modeKeyMap[key]) {
                 console.log(`Mode key matched: key=${key}, mode=${modeKeyMap[key]}`);
-                changeMode(modeKeyMap[key]);
+                const button = document.querySelector(`.mode-key[data-key="${key}"]`);
+                if (button) {
+                    changeMode(button.dataset.mode, button);
+                } else {
+                    console.log(`No mode button found for data-key="${key}"`);
+                }
             }
         });
 
@@ -656,12 +263,45 @@
 
             console.log(`Keyup: key=${key}, code=${code}`);
 
-            const mapping = keyMappings[currentKeypadLayout][code];
-            if (mapping && mapping.action === 'note') {
-                console.log(`Stopping note for code=${code}, buttonKey=${mapping.buttonKey}`);
-                stopNote(mapping.buttonKey);
+            const noteKeyMap = {
+                'Digit5': { degree: 0, buttonKey: 'r' },
+                'KeyR': { degree: 0, buttonKey: 'r' },
+                'KeyT': { degree: 0, buttonKey: 'r' },
+                'Digit2': { degree: -6, buttonKey: '2' },
+                'Digit3': { degree: -4, buttonKey: '3' },
+                'Digit4': { degree: -2, buttonKey: '4' },
+                'Digit6': { degree: 2, buttonKey: '6' },
+                'Digit7': { degree: 4, buttonKey: '7' },
+                'Digit8': { degree: 6, buttonKey: '8' }
+            };
+
+            if (noteKeyMap[code]) {
+                console.log(`Stopping note for code=${code}, buttonKey=${noteKeyMap[code].buttonKey}`);
+                const button = document.querySelector(`.note-key[data-key="${noteKeyMap[code].buttonKey}"]`);
+                if (button && activeOscillators.has(noteKeyMap[code].buttonKey)) {
+                    const degree = parseInt(button.dataset.degree);
+                    stopNote(noteKeyMap[code].buttonKey);
+                    updateTonic(degree);
+                }
             }
         });
+
+        // Initialize with Ionian mode and C key selected
+        const initModeButton = document.querySelector('.mode-key[data-mode="ionian"]');
+        initModeButton.classList.remove('bg-green-500');
+        initModeButton.classList.add('bg-green-700');
+        activeModeButton = initModeButton;
+
+        const initKeyButton = document.querySelector('.key-key[data-key="0"]');
+        initKeyButton.classList.remove('bg-purple-500');
+        initKeyButton.classList.add('bg-purple-700');
+        activeKeyButton = initKeyButton;
+
+        // Initialize note labels
+        updateNoteLabels();
+    </script>
+</body>
+</html>
     </script>
 </body>
 </html>
